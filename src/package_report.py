@@ -64,7 +64,7 @@ def _get_package_versions_in_upstream(target_packages_match_spec_out, target_ver
 
 
 def _generate_staleness_report_per_image(
-    package_versions_in_upstream, target_packages_match_spec_out, image_config, version
+    package_versions_in_upstream, target_packages_match_spec_out, image_config, version, download_stats
 ):
     print("\n# Staleness Report: " + str(version) + "(" + image_config["image_type"] + ")\n")
     staleness_report_rows = []
@@ -86,6 +86,15 @@ def _generate_staleness_report_per_image(
                 conda_download_stats[pkg] = pkg_stats.get(pkg, "N/A")
         except ValueError as e:
             conda_download_stats[pkg] = "N/A"
+    if download_stats:
+        # Get conda download statistics for all installed packages
+        # Use the month before last to get full month of data
+        previous_month = (datetime.now() - relativedelta(months=2)).strftime("%Y-%m")
+        pkg_list = list(package_versions_in_upstream.keys())
+        # Suppress FutureWarning from pandas so it doesn't show in report
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            conda_download_stats = overall(pkg_list, month=previous_month)
 
     for package in package_versions_in_upstream:
         version_in_sagemaker_distribution = str(target_packages_match_spec_out[package].get("version")).removeprefix(
@@ -97,20 +106,29 @@ def _generate_staleness_report_per_image(
             else "${\color{red}" + package + "}$"
         )
 
-        # Get download count with error handling
-        try:
-            download_count = conda_download_stats[package]
-        except (KeyError, TypeError):
-            download_count = 0
+        if download_stats:
+            # Get download count with error handling
+            try:
+                download_count = conda_download_stats[package]
+            except (KeyError, TypeError):
+                download_count = 0
 
-        staleness_report_rows.append(
-            {
-                "package": package_string,
-                "version_in_sagemaker_distribution": version_in_sagemaker_distribution,
-                "latest_relavant_version": package_versions_in_upstream[package],
-                "downloads": download_count,
-            }
-        )
+            staleness_report_rows.append(
+                {
+                    "package": package_string,
+                    "version_in_sagemaker_distribution": version_in_sagemaker_distribution,
+                    "latest_relavant_version": package_versions_in_upstream[package],
+                    "downloads": download_count,
+                }
+            )
+        else:
+            staleness_report_rows.append(
+                {
+                    "package": package_string,
+                    "version_in_sagemaker_distribution": version_in_sagemaker_distribution,
+                    "latest_relavant_version": package_versions_in_upstream[package],
+                }
+            )
 
     def sort_key(x):
         # First key: False for stale packages (they start with "${\\color")
@@ -140,6 +158,20 @@ def _generate_staleness_report_per_image(
             staleness_report_rows,
         )
     )
+    markdown_table_columns = [
+        "Package",
+        "Current Version in the Distribution image",
+        "Latest Relevant Version in " "Upstream",
+    ]
+    if download_stats:
+        markdown_table_columns.append("Downloads (Conda, previous month)")
+        staleness_report_rows.sort(
+            key=lambda x: (
+                not x["package"].startswith("${\\color"),  # Stale packages at top of list
+                -x["downloads"],  # Sorted by downloads
+            )
+        )
+    print(create_markdown_table(markdown_table_columns, staleness_report_rows))
 
 
 def _get_installed_package_versions_and_conda_versions(
@@ -308,7 +340,11 @@ def generate_package_staleness_report(args):
             latest_package_versions_in_upstream,
         ) = _get_installed_package_versions_and_conda_versions(image_config, target_version_dir, target_version)
         _generate_staleness_report_per_image(
-            latest_package_versions_in_upstream, target_packages_match_spec_out, image_config, target_version
+            latest_package_versions_in_upstream,
+            target_packages_match_spec_out,
+            image_config,
+            target_version,
+            args.download_stats,
         )
 
 
